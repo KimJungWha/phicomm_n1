@@ -10,7 +10,7 @@ jobs:
   gen_bootfs: 
     runs-on: ubuntu-latest
     container:
-      image: archlinux:base-devel
+      image: archlinux
     steps: 
     - name: Checkout
       uses: actions/checkout@v2
@@ -20,7 +20,7 @@ jobs:
 
     - name: Env Init
       run: |
-        pacman -Syyu --noconfirm --needed aarch64-linux-gnu-gcc pacman-contrib xmlto docbook-xsl kmod inetutils bc git uboot-tools dtc
+        pacman -Syyu --noconfirm --needed aarch64-linux-gnu-gcc pacman-contrib xmlto docbook-xsl kmod inetutils bc git uboot-tools dtc base base-devel sudo 
         echo "nobody ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
         cp -rfv $GITHUB_WORKSPACE/kernel ${{ env.OUTPUT }}
         chown -Rv nobody:root ${{ env.OUTPUT }}

@@ -1,0 +1,121 @@
+name: ArchLinux Arm For Phicomm-N1
+
+on: push
+
+env: 
+  OUTPUT: /output
+  ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+
+jobs: 
+  gen_bootfs: 
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps: 
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Fix glibc
+      run: curl -fsSL https://repo.archlinuxcn.org/x86_64/glibc-linux4-2.33-5-x86_64.pkg.tar.zst | bsdtar -C / -xvf -
+
+    - name: Env Init
+      run: |
+        pacman -Syyu --noconfirm --needed aarch64-linux-gnu-gcc pacman-contrib
+        echo "nobody ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+        cp -rfv $GITHUB_WORKSPACE/kernel ${{ env.OUTPUT }}
+        chown -Rv nobody:root ${{ env.OUTPUT }}
+
+    - name: Build
+      run: | 
+        pushd ${{ env.OUTPUT }}
+        sudo -u nobody updpkgsums
+        sudo -u nobody env \
+        ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- KBUILD_BUILD_HOST=github \
+        KBUILD_BUILD_USER=${{ github.repository_owner }} \
+        makepkg --syncdeps --noconfirm --config "$GITHUB_WORKSPACE/makepkg.conf"
+        pushd
+
+    - name: Upload 
+      uses: actions/upload-artifact@v2
+      with: 
+        name: ${{ github.job }}
+        path: ${{ env.OUTPUT }}/*.pkg.tar.*
+  
+  gen_rootfs: 
+    runs-on: ubuntu-latest
+    needs: gen_bootfs
+    steps: 
+
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Download
+      uses: actions/download-artifact@v2
+      with: 
+        name: gen_bootfs
+
+    - name: Check Vars
+      run: |
+        TAG=$(grep 'pkgver=' $GITHUB_WORKSPACE/kernel/PKGBUILD | awk -F '=' '{print $2}')
+        echo "::set-env name=TAG::$TAG"
+        IMG=$(echo ArchLinuxArm-Linux_"$TAG"-`date +%Y.%m.%d`.img)
+        echo "::set-env name=IMG::$IMG"
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v1
+
+    - name: Generate Image
+      run: |
+        sudo fallocate -l 2G ${{ env.IMG }}
+        sudo parted -s -a optimal ${{ env.IMG }} mklabel msdos mkpart primary fat32 0% 256MiB mkpart primary ext4 256MiB 100%
+
+        LOOP=$(sudo losetup -f -P --show ${{ env.IMG }})
+        echo "::set-env name=LOOP::$LOOP"
+        sudo mkfs.vfat -F 32 -n ARCHBOOT "${LOOP}p1"
+        sudo mkfs.ext4 -L ARCHROOT "${LOOP}p2"
+
+        sudo mkdir /rootfs
+        sudo mount "${LOOP}p2" /rootfs
+        sudo mkdir -p /rootfs/boot
+        sudo mount "${LOOP}p1" /rootfs/boot
+
+    - name: Generate Rootfs
+      run: |
+        sudo docker run -i --privileged -v $GITHUB_WORKSPACE:/file -v /rootfs:/rootfs agners/archlinuxarm-arm64v8 /bin/bash <<-EOF
+          /bin/bash /file/main.sh
+        EOF
+
+    - name: Generate Bootfs
+      run: |
+        ROOT_UUID=$(sudo lsblk -n -o UUID "${LOOP}p2")
+        BOOT_UUID=$(sudo lsblk -n -o UUID "${LOOP}p1")
+
+        sudo sed -i "s/root_uuid/${ROOT_UUID}/" /rootfs/boot/extlinux/extlinux.conf
+        echo "UUID=${ROOT_UUID} / ext4 rw,relatime 0 1" | sudo tee -a /rootfs/etc/fstab
+        echo "UUID=${BOOT_UUID} /boot vfat rw,relatime,fmask=0022,dmask=0022,codepage=437,iocharset=ascii,shortname=mixed,utf8,errors=remount-ro 0 2" | sudo tee -a /rootfs/etc/fstab
+
+        echo 
+        cat /rootfs/etc/fstab
+        echo 
+        cat /rootfs/boot/extlinux/extlinux.conf
+
+    - name: Copy File
+      run: |
+        sudo umount -R /rootfs
+        sudo losetup -D $LOOP
+        sudo mkdir ${{ env.OUTPUT }}
+        tar -Jcvf ArchLinuxArm_Linux-"$TAG"_`date +%Y.%m.%d`.tar.xz ${{ env.IMG }}
+        sudo cp -rfv $GITHUB_WORKSPACE/*.{xz,zst} ${{ env.OUTPUT }}
+
+
+    - name: Create Releases
+      uses: marvinpinto/action-automatic-releases@latest
+      with: 
+        artifacts: ${{ env.OUTPUT }}/*
+        prerelease: false
+        repo_token: ${{ secrets.REPO_TOKEN }}
+        automatic_release_tag: ${{ env.TAG }}
+        title: "ArchLinuxArm-Linux-${{ env.TAG }}"
+        files: | 
+          *.tar.xz
+          *.tar.zst
